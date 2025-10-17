@@ -1,103 +1,347 @@
-import Image from "next/image";
+"use client";
+
+import { useState, useEffect } from "react";
+import { usePrivy } from "@privy-io/react-auth";
+import {
+  useCreateWallet,
+  useSignRawHash,
+} from "@privy-io/react-auth/extended-chains";
+import {
+  Aptos,
+  AptosConfig,
+  Network,
+  AccountAddress,
+  AccountAuthenticatorEd25519,
+  Ed25519PublicKey,
+  Ed25519Signature,
+  generateSigningMessageForTransaction,
+} from "@aptos-labs/ts-sdk";
+import { toHex } from "viem";
+
+const CONTRACT_ADDRESS =
+  "0x10bcbbc693740204b97bff6a76c344a9aed7f8c1bbd2b2482b9a0fd947b2b55e";
+const BET_AMOUNT = 1000000;
+
+const aptos = new Aptos(
+  new AptosConfig({
+    network: Network.TESTNET,
+  })
+);
 
 export default function Home() {
-  return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+  const { ready, authenticated, user, login, logout } = usePrivy();
+  const { createWallet } = useCreateWallet();
+  const { signRawHash } = useSignRawHash();
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+  const [choice, setChoice] = useState<number>(0);
+  const [potBalance, setPotBalance] = useState<string>("0");
+  const [isLoading, setIsLoading] = useState(false);
+  const [txStatus, setTxStatus] = useState<string>("");
+  const [lastResult, setLastResult] = useState<"win" | "lose" | null>(null);
+  const [txHash, setTxHash] = useState<string>("");
+
+  const createAptosWallet = async () => {
+    const wallet = await createWallet({
+      chainType: "aptos",
+    });
+    return wallet;
+  };
+  const fetchPotBalance = async () => {
+    try {
+      const result = await aptos.view({
+        payload: {
+          function: `${CONTRACT_ADDRESS}::coin_flip::get_pot_balance`,
+          typeArguments: [],
+          functionArguments: [CONTRACT_ADDRESS],
+        },
+      });
+      setPotBalance(result[0] as string);
+    } catch (error) {
+      console.error("Error fetching pot balance:", error);
+    }
+  };
+
+  useEffect(() => {
+    if (authenticated) {
+      fetchPotBalance();
+      const interval = setInterval(fetchPotBalance, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [authenticated]);
+
+  const handlePlay = async () => {
+    if (!authenticated || !user) {
+      setTxStatus("Please connect your wallet first");
+      return;
+    }
+
+    const aptosWallet = user.linkedAccounts?.find(
+      (account: any) => account.chainType === "aptos"
+    ) as any;
+
+    if (!aptosWallet) {
+      setTxStatus("Please create an Aptos wallet first");
+      return;
+    }
+
+    const walletAddress = aptosWallet.address as string;
+    let publicKeyHex = (aptosWallet.publicKey as string) || "";
+
+    if (!walletAddress || !publicKeyHex) {
+      setTxStatus("Wallet not properly configured");
+      return;
+    }
+
+    setIsLoading(true);
+    setLastResult(null);
+
+    try {
+      const potBefore = potBalance;
+
+      if (publicKeyHex.toLowerCase().startsWith("0x")) {
+        publicKeyHex = publicKeyHex.slice(2);
+      }
+
+      if (publicKeyHex.length === 66 && publicKeyHex.startsWith("00")) {
+        publicKeyHex = publicKeyHex.substring(2);
+      }
+
+      if (publicKeyHex.length !== 64) {
+        setTxStatus("Invalid public key format");
+        setIsLoading(false);
+        return;
+      }
+
+      const address = AccountAddress.from(walletAddress);
+
+      const rawTxn = await aptos.transaction.build.simple({
+        sender: address,
+        data: {
+          function: `${CONTRACT_ADDRESS}::coin_flip::play`,
+          typeArguments: [],
+          functionArguments: [choice, CONTRACT_ADDRESS],
+        },
+      });
+
+      const message = generateSigningMessageForTransaction(rawTxn);
+
+      const { signature: rawSignature } = await signRawHash({
+        address: walletAddress,
+        chainType: "aptos",
+        hash: toHex(message),
+      });
+
+      const senderAuthenticator = new AccountAuthenticatorEd25519(
+        new Ed25519PublicKey(publicKeyHex),
+        new Ed25519Signature(rawSignature.slice(2))
+      );
+
+      const pending = await aptos.transaction.submit.simple({
+        transaction: rawTxn,
+        senderAuthenticator,
+      });
+
+      await aptos.waitForTransaction({
+        transactionHash: pending.hash,
+      });
+
+      setTxHash(pending.hash);
+
+      await fetchPotBalance();
+
+      const potAfter = await aptos.view({
+        payload: {
+          function: `${CONTRACT_ADDRESS}::coin_flip::get_pot_balance`,
+          typeArguments: [],
+          functionArguments: [CONTRACT_ADDRESS],
+        },
+      });
+      const potAfterValue = potAfter[0] as string;
+
+      if (parseInt(potAfterValue) === 0 && parseInt(potBefore) > 0) {
+        setLastResult("win");
+        setTxStatus(
+          `🎉 YOU WON! You took ${
+            (parseInt(potBefore) + BET_AMOUNT) / 100000000
+          } APT!`
+        );
+      } else if (parseInt(potAfterValue) > parseInt(potBefore)) {
+        setLastResult("lose");
+        setTxStatus(`😢 You lost. Your 0.01 APT is now in the pot.`);
+      } else {
+        setLastResult("win");
+        setTxStatus(`🎉 YOU WON THE JACKPOT!`);
+      }
+    } catch (error: any) {
+      setTxStatus(`Error: ${error.message || "Transaction failed"}`);
+      setLastResult(null);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  if (!ready) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center text-gray-600 p-8">Loading...</div>
+      </div>
+    );
+  }
+
+  if (!authenticated) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4">
+        <div className="bg-white p-8 rounded-2xl border border-gray-100 text-center max-w-md w-full">
+          <h2 className="text-3xl font-bold text-gray-900 mb-6">
+            Privy x Aptos demo
+          </h2>
+          <button
+            onClick={login}
+            className="bg-blue-500 text-white px-4 py-2 rounded-md"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+            Login
+          </button>
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
+      </div>
+    );
+  }
+
+  const aptBalance = (parseInt(potBalance) / 100000000).toFixed(4);
+
+  // Get Aptos wallet from user's linked accounts
+  const aptosWallet = user?.linkedAccounts?.find(
+    (account: any) => account.chainType === "aptos"
+  ) as any;
+
+  return (
+    <div className="min-h-screen flex items-center justify-center p-4">
+      <div className="bg-white p-8 rounded-2xl border border-gray-100 max-w-lg w-full">
+        <h2 className="text-3xl font-bold text-gray-900 mb-2 text-center">
+          Privy x Aptos demo
+        </h2>
+        <p className="text-[0.95rem] text-gray-600 mb-6 text-center">
+          Choose 0 or 1, bet 0.01 APT. Winner takes all!
+        </p>
+
+        {/* Aptos Wallet Section */}
+        <div className="bg-blue-50 p-4 rounded-lg border border-blue-200 mb-6">
+          <div className="text-sm font-semibold text-blue-700 uppercase tracking-wide mb-2 text-center">
+            Aptos Wallet
+          </div>
+          {aptosWallet ? (
+            <div className="text-center">
+              <div className="text-sm text-blue-600 mb-1">Address:</div>
+              <div className="text-xs font-mono text-blue-800 break-all bg-blue-100 p-2 rounded">
+                {aptosWallet.address}
+              </div>
+            </div>
+          ) : (
+            <div className="text-center">
+              <div className="text-sm text-blue-600 mb-3">
+                No Aptos wallet found
+              </div>
+              <button
+                onClick={createAptosWallet}
+                className="bg-blue-500 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-600 transition-colors"
+              >
+                Create Aptos Wallet
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="bg-gray-50 p-6 rounded-xl border-2 border-gray-200 mb-6 text-center">
+          <div className="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-2">
+            Current Jackpot
+          </div>
+          <div className="text-4xl font-bold text-gray-900 mb-1">
+            {aptBalance} APT
+          </div>
+          <div className="text-sm text-gray-500">{potBalance} Octas</div>
+        </div>
+
+        <div className="mb-6">
+          <div className="text-[0.95rem] font-medium text-gray-700 mb-3 text-center">
+            Choose your side:
+          </div>
+          <div className="flex gap-4 justify-center">
+            <button
+              onClick={() => setChoice(0)}
+              disabled={isLoading}
+              className={`flex-1 max-w-[100px] p-4 text-2xl font-bold rounded-xl border-2 transition-all duration-200 ${
+                choice === 0
+                  ? "bg-gray-900 text-white border-gray-900 scale-105"
+                  : "bg-gray-50 text-gray-700 border-gray-300 hover:bg-gray-100"
+              } ${
+                isLoading ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
+              }`}
+            >
+              0
+            </button>
+            <button
+              onClick={() => setChoice(1)}
+              disabled={isLoading}
+              className={`flex-1 max-w-[100px] p-4 text-2xl font-bold rounded-xl border-2 transition-all duration-200 ${
+                choice === 1
+                  ? "bg-gray-900 text-white border-gray-900 scale-105"
+                  : "bg-gray-50 text-gray-700 border-gray-300 hover:bg-gray-100"
+              } ${
+                isLoading ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
+              }`}
+            >
+              1
+            </button>
+          </div>
+        </div>
+
+        <button
+          onClick={handlePlay}
+          disabled={isLoading}
+          className={`w-full px-8 py-4 text-lg font-semibold bg-gray-900 text-white rounded-xl transition-all duration-200 mb-4 ${
+            isLoading
+              ? "opacity-60 cursor-not-allowed"
+              : "hover:bg-gray-800 cursor-pointer"
+          }`}
         >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+          {isLoading ? "Playing..." : "🎲 Play (0.01 APT)"}
+        </button>
+
+        {txStatus && (
+          <div
+            className={`p-4 rounded-lg text-[0.95rem] text-center mb-4 ${
+              lastResult === "win"
+                ? "bg-green-100 text-green-800 border border-green-200"
+                : lastResult === "lose"
+                ? "bg-red-100 text-red-800 border border-red-200"
+                : "bg-gray-50 text-gray-700"
+            }`}
+          >
+            <div className="mb-2">{txStatus}</div>
+            {txHash && (
+              <div className="text-xs">
+                <a
+                  href={`https://explorer.aptoslabs.com/txn/${txHash}?network=testnet`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-600 hover:text-blue-800 underline"
+                >
+                  View on Aptos Explorer ↗
+                </a>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="bg-gray-50 p-4 rounded-lg text-sm text-gray-700">
+          <p className="my-1 leading-relaxed">
+            💡 <strong>How it works:</strong>
+          </p>
+          <p className="my-1 leading-relaxed">
+            • Win: Take the entire pot
+            <br />• Lose: Your bet adds to the pot
+          </p>
+        </div>
+      </div>
     </div>
   );
 }
