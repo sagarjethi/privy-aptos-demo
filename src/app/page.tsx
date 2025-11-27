@@ -18,6 +18,25 @@ import {
 } from "@aptos-labs/ts-sdk";
 import { toHex } from "viem";
 
+interface AptosLinkedAccount {
+  chainType: string;
+  address: string;
+  publicKey: string;
+}
+
+function isAptosAccount(account: unknown): account is AptosLinkedAccount {
+  return (
+    typeof account === "object" &&
+    account !== null &&
+    "chainType" in account &&
+    (account as { chainType: unknown }).chainType === "aptos" &&
+    "address" in account &&
+    typeof (account as { address: unknown }).address === "string" &&
+    "publicKey" in account &&
+    typeof (account as { publicKey: unknown }).publicKey === "string"
+  );
+}
+
 const CONTRACT_ADDRESS =
   "0x10bcbbc693740204b97bff6a76c344a9aed7f8c1bbd2b2482b9a0fd947b2b55e";
 const BET_AMOUNT = 1000000;
@@ -29,7 +48,7 @@ const aptos = new Aptos(
 );
 
 export default function Home() {
-  const { ready, authenticated, user, login, logout } = usePrivy();
+  const { ready, authenticated, user, login } = usePrivy();
   const { createWallet } = useCreateWallet();
   const { signRawHash } = useSignRawHash();
 
@@ -75,17 +94,22 @@ export default function Home() {
       return;
     }
 
-    const aptosWallet = user.linkedAccounts?.find(
-      (account: any) => account.chainType === "aptos"
-    ) as any;
+    const foundAccount = user.linkedAccounts?.find(
+      (account) => 
+        typeof account === "object" &&
+        account !== null &&
+        "chainType" in account &&
+        (account as { chainType?: unknown }).chainType === "aptos"
+    );
+    const aptosWallet = foundAccount && isAptosAccount(foundAccount) ? foundAccount : undefined;
 
     if (!aptosWallet) {
       setTxStatus("Please create an Aptos wallet first");
       return;
     }
 
-    const walletAddress = aptosWallet.address as string;
-    let publicKeyHex = (aptosWallet.publicKey as string) || "";
+    const walletAddress = (aptosWallet as AptosLinkedAccount).address as string;
+    let publicKeyHex = ((aptosWallet as AptosLinkedAccount).publicKey as string) || "";
 
     if (!walletAddress || !publicKeyHex) {
       setTxStatus("Wallet not properly configured");
@@ -172,8 +196,9 @@ export default function Home() {
         setLastResult("win");
         setTxStatus(`🎉 YOU WON THE JACKPOT!`);
       }
-    } catch (error: any) {
-      setTxStatus(`Error: ${error.message || "Transaction failed"}`);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Transaction failed";
+      setTxStatus(`Error: ${errorMessage}`);
       setLastResult(null);
     } finally {
       setIsLoading(false);
@@ -209,9 +234,14 @@ export default function Home() {
   const aptBalance = (parseInt(potBalance) / 100000000).toFixed(4);
 
   // Get Aptos wallet from user's linked accounts
-  const aptosWallet = user?.linkedAccounts?.find(
-    (account: any) => account.chainType === "aptos"
-  ) as any;
+  const foundAccount = user?.linkedAccounts?.find(
+    (account) => 
+      typeof account === "object" &&
+      account !== null &&
+      "chainType" in account &&
+      (account as { chainType?: unknown }).chainType === "aptos"
+  );
+  const aptosWallet = foundAccount && isAptosAccount(foundAccount) ? foundAccount : undefined;
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4">
@@ -232,7 +262,7 @@ export default function Home() {
             <div className="text-center">
               <div className="text-sm text-blue-600 mb-1">Address:</div>
               <div className="text-xs font-mono text-blue-800 break-all bg-blue-100 p-2 rounded">
-                {aptosWallet.address}
+                {(aptosWallet as AptosLinkedAccount).address}
               </div>
             </div>
           ) : (

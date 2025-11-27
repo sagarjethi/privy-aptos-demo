@@ -18,6 +18,25 @@ import {
 } from "@aptos-labs/ts-sdk";
 import { toHex } from "viem";
 
+interface AptosLinkedAccount {
+  chainType: string;
+  address: string;
+  publicKey: string;
+}
+
+function isAptosAccount(account: unknown): account is AptosLinkedAccount {
+  return (
+    typeof account === "object" &&
+    account !== null &&
+    "chainType" in account &&
+    (account as { chainType: unknown }).chainType === "aptos" &&
+    "address" in account &&
+    typeof (account as { address: unknown }).address === "string" &&
+    "publicKey" in account &&
+    typeof (account as { publicKey: unknown }).publicKey === "string"
+  );
+}
+
 // Configure Move client for Movement testnet
 const aptos = new Aptos(
   new AptosConfig({
@@ -59,12 +78,17 @@ export default function MovementTxPage() {
 
   useEffect(() => {
     if (authenticated && user) {
-      const moveWallet = user.linkedAccounts?.find(
-        (account: any) => account.chainType === "aptos"
-      ) as any;
+      const foundAccount = user.linkedAccounts?.find(
+        (account) => 
+          typeof account === "object" &&
+          account !== null &&
+          "chainType" in account &&
+          (account as { chainType?: unknown }).chainType === "aptos"
+      );
+      const moveWallet = foundAccount && isAptosAccount(foundAccount) ? foundAccount : undefined;
 
       if (moveWallet?.address) {
-        fetchWalletBalance(moveWallet.address);
+        fetchWalletBalance((moveWallet as AptosLinkedAccount).address);
       }
     }
   }, [authenticated, user]);
@@ -75,9 +99,14 @@ export default function MovementTxPage() {
       return;
     }
 
-    const moveWallet = user.linkedAccounts?.find(
-      (account: any) => account.chainType === "aptos"
-    ) as any;
+    const foundAccount = user.linkedAccounts?.find(
+      (account) => 
+        typeof account === "object" &&
+        account !== null &&
+        "chainType" in account &&
+        (account as { chainType?: unknown }).chainType === "aptos"
+    );
+    const moveWallet = foundAccount && isAptosAccount(foundAccount) ? foundAccount : undefined;
 
     if (!moveWallet) {
       setTxStatus("Please create a Move wallet first");
@@ -89,8 +118,8 @@ export default function MovementTxPage() {
       return;
     }
 
-    const walletAddress = moveWallet.address as string;
-    let publicKeyHex = (moveWallet.publicKey as string) || "";
+    const walletAddress = (moveWallet as AptosLinkedAccount).address as string;
+    let publicKeyHex = ((moveWallet as AptosLinkedAccount).publicKey as string) || "";
 
     if (!walletAddress || !publicKeyHex) {
       setTxStatus("Wallet not properly configured");
@@ -161,8 +190,9 @@ export default function MovementTxPage() {
 
       // Refresh wallet balance
       await fetchWalletBalance(walletAddress);
-    } catch (error: any) {
-      setTxStatus(`❌ Error: ${error.message || "Transaction failed"}`);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Transaction failed";
+      setTxStatus(`❌ Error: ${errorMessage}`);
       console.error("Transaction error:", error);
     } finally {
       setIsLoading(false);
@@ -199,9 +229,14 @@ export default function MovementTxPage() {
   }
 
   // Get Move wallet from user's linked accounts
-  const moveWallet = user?.linkedAccounts?.find(
-    (account: any) => account.chainType === "aptos"
-  ) as any;
+  const foundAccount = user?.linkedAccounts?.find(
+    (account) => 
+      typeof account === "object" &&
+      account !== null &&
+      "chainType" in account &&
+      (account as { chainType?: unknown }).chainType === "aptos"
+  );
+  const moveWallet = foundAccount && isAptosAccount(foundAccount) ? foundAccount : undefined;
 
   const balanceInMOVE = (parseInt(walletBalance) / 100000000).toFixed(4);
 
@@ -224,7 +259,7 @@ export default function MovementTxPage() {
             <div className="text-center">
               <div className="text-sm text-blue-600 mb-1">Address:</div>
               <div className="text-xs font-mono text-blue-800 break-all bg-blue-100 p-2 rounded mb-2">
-                {moveWallet.address}
+                {(moveWallet as AptosLinkedAccount).address}
               </div>
               <div className="text-sm text-blue-600">
                 Balance:{" "}
