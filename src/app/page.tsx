@@ -17,6 +17,14 @@ import {
   generateSigningMessageForTransaction,
 } from "@aptos-labs/ts-sdk";
 import { toHex } from "viem";
+import {
+  formatAPT,
+  cleanPublicKey,
+  getErrorMessage,
+  getExplorerLink,
+  octasToAPT,
+} from "@/lib/aptos-utils";
+import { useAptosWallet, useAptosBalance } from "@/lib/aptos-hooks";
 
 interface AptosLinkedAccount {
   chainType: string;
@@ -48,9 +56,11 @@ const aptos = new Aptos(
 );
 
 export default function Home() {
-  const { ready, authenticated, user, login } = usePrivy();
+  const { ready, authenticated, user, login, logout } = usePrivy();
   const { createWallet } = useCreateWallet();
   const { signRawHash } = useSignRawHash();
+  const aptosWallet = useAptosWallet();
+  const { balance: walletBalance } = useAptosBalance();
 
   const [choice, setChoice] = useState<number>(0);
   const [potBalance, setPotBalance] = useState<string>("0");
@@ -58,12 +68,21 @@ export default function Home() {
   const [txStatus, setTxStatus] = useState<string>("");
   const [lastResult, setLastResult] = useState<"win" | "lose" | null>(null);
   const [txHash, setTxHash] = useState<string>("");
+  const [creatingWallet, setCreatingWallet] = useState(false);
 
   const createAptosWallet = async () => {
-    const wallet = await createWallet({
-      chainType: "aptos",
-    });
-    return wallet;
+    setCreatingWallet(true);
+    try {
+      const wallet = await createWallet({
+        chainType: "aptos",
+      });
+      return wallet;
+    } catch (error) {
+      const errorMessage = getErrorMessage(error);
+      setTxStatus(`Error creating wallet: ${errorMessage}`);
+    } finally {
+      setCreatingWallet(false);
+    }
   };
   const fetchPotBalance = async () => {
     try {
@@ -108,8 +127,8 @@ export default function Home() {
       return;
     }
 
-    const walletAddress = (aptosWallet as AptosLinkedAccount).address as string;
-    let publicKeyHex = ((aptosWallet as AptosLinkedAccount).publicKey as string) || "";
+    const walletAddress = aptosWallet.address;
+    let publicKeyHex = aptosWallet.publicKey;
 
     if (!walletAddress || !publicKeyHex) {
       setTxStatus("Wallet not properly configured");
@@ -122,15 +141,10 @@ export default function Home() {
     try {
       const potBefore = potBalance;
 
-      if (publicKeyHex.toLowerCase().startsWith("0x")) {
-        publicKeyHex = publicKeyHex.slice(2);
-      }
-
-      if (publicKeyHex.length === 66 && publicKeyHex.startsWith("00")) {
-        publicKeyHex = publicKeyHex.substring(2);
-      }
-
-      if (publicKeyHex.length !== 64) {
+      // Clean public key using utility function
+      try {
+        publicKeyHex = cleanPublicKey(publicKeyHex);
+      } catch {
         setTxStatus("Invalid public key format");
         setIsLoading(false);
         return;
@@ -197,7 +211,7 @@ export default function Home() {
         setTxStatus(`🎉 YOU WON THE JACKPOT!`);
       }
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "Transaction failed";
+      const errorMessage = getErrorMessage(error);
       setTxStatus(`Error: ${errorMessage}`);
       setLastResult(null);
     } finally {
@@ -231,17 +245,7 @@ export default function Home() {
     );
   }
 
-  const aptBalance = (parseInt(potBalance) / 100000000).toFixed(4);
-
-  // Get Aptos wallet from user's linked accounts
-  const foundAccount = user?.linkedAccounts?.find(
-    (account) => 
-      typeof account === "object" &&
-      account !== null &&
-      "chainType" in account &&
-      (account as { chainType?: unknown }).chainType === "aptos"
-  );
-  const aptosWallet = foundAccount && isAptosAccount(foundAccount) ? foundAccount : undefined;
+  const aptBalance = formatAPT(octasToAPT(potBalance));
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4">
@@ -261,8 +265,11 @@ export default function Home() {
           {aptosWallet ? (
             <div className="text-center">
               <div className="text-sm text-blue-600 mb-1">Address:</div>
-              <div className="text-xs font-mono text-blue-800 break-all bg-blue-100 p-2 rounded">
-                {(aptosWallet as AptosLinkedAccount).address}
+              <div className="text-xs font-mono text-blue-800 break-all bg-blue-100 p-2 rounded mb-2">
+                {aptosWallet.address}
+              </div>
+              <div className="text-sm text-blue-600">
+                Balance: <span className="font-semibold">{formatAPT(walletBalance)} APT</span>
               </div>
             </div>
           ) : (
@@ -272,9 +279,10 @@ export default function Home() {
               </div>
               <button
                 onClick={createAptosWallet}
-                className="bg-blue-500 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-600 transition-colors"
+                disabled={creatingWallet}
+                className="bg-blue-500 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                Create Aptos Wallet
+                {creatingWallet ? "Creating..." : "Create Aptos Wallet"}
               </button>
             </div>
           )}
@@ -348,12 +356,12 @@ export default function Home() {
           >
             <div className="mb-2">{txStatus}</div>
             {txHash && (
-              <div className="text-xs">
+              <div className="text-xs mt-2">
                 <a
-                  href={`https://explorer.aptoslabs.com/txn/${txHash}?network=testnet`}
+                  href={getExplorerLink(txHash, "testnet")}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-blue-600 hover:text-blue-800 underline"
+                  className="text-blue-600 hover:text-blue-800 underline font-medium"
                 >
                   View on Aptos Explorer ↗
                 </a>
@@ -370,6 +378,16 @@ export default function Home() {
             • Win: Take the entire pot
             <br />• Lose: Your bet adds to the pot
           </p>
+        </div>
+
+        {/* Logout Button */}
+        <div className="mt-4 text-center">
+          <button
+            onClick={logout}
+            className="text-sm text-gray-500 hover:text-gray-700 underline transition-colors"
+          >
+            Logout
+          </button>
         </div>
       </div>
     </div>

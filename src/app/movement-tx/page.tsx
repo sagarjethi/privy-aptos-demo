@@ -17,6 +17,16 @@ import {
   generateSigningMessageForTransaction,
 } from "@aptos-labs/ts-sdk";
 import { toHex } from "viem";
+import {
+  formatAPT,
+  cleanPublicKey,
+  getErrorMessage,
+  getMovementExplorerLink,
+  aptToOctas,
+  isValidAddress,
+  octasToAPT,
+} from "@/lib/aptos-utils";
+import { useAptosWallet } from "@/lib/aptos-hooks";
 
 interface AptosLinkedAccount {
   chainType: string;
@@ -49,6 +59,7 @@ export default function MovementTxPage() {
   const { ready, authenticated, user, login, logout } = usePrivy();
   const { createWallet } = useCreateWallet();
   const { signRawHash } = useSignRawHash();
+  const moveWallet = useAptosWallet();
 
   const [recipientAddress, setRecipientAddress] = useState<string>("");
   const [amount, setAmount] = useState<string>("1");
@@ -56,12 +67,22 @@ export default function MovementTxPage() {
   const [txStatus, setTxStatus] = useState<string>("");
   const [txHash, setTxHash] = useState<string>("");
   const [walletBalance, setWalletBalance] = useState<string>("0");
+  const [creatingWallet, setCreatingWallet] = useState(false);
+  const [addressError, setAddressError] = useState<string>("");
 
   const createMoveWallet = async () => {
-    const wallet = await createWallet({
-      chainType: "aptos",
-    });
-    return wallet;
+    setCreatingWallet(true);
+    try {
+      const wallet = await createWallet({
+        chainType: "aptos",
+      });
+      return wallet;
+    } catch (error) {
+      const errorMessage = getErrorMessage(error);
+      setTxStatus(`Error creating wallet: ${errorMessage}`);
+    } finally {
+      setCreatingWallet(false);
+    }
   };
 
   const fetchWalletBalance = async (address: string) => {
@@ -77,36 +98,16 @@ export default function MovementTxPage() {
   };
 
   useEffect(() => {
-    if (authenticated && user) {
-      const foundAccount = user.linkedAccounts?.find(
-        (account) => 
-          typeof account === "object" &&
-          account !== null &&
-          "chainType" in account &&
-          (account as { chainType?: unknown }).chainType === "aptos"
-      );
-      const moveWallet = foundAccount && isAptosAccount(foundAccount) ? foundAccount : undefined;
-
-      if (moveWallet?.address) {
-        fetchWalletBalance((moveWallet as AptosLinkedAccount).address);
-      }
+    if (moveWallet?.address) {
+      fetchWalletBalance(moveWallet.address);
     }
-  }, [authenticated, user]);
+  }, [moveWallet?.address]);
 
   const handleTransaction = async () => {
     if (!authenticated || !user) {
       setTxStatus("Please connect your wallet first");
       return;
     }
-
-    const foundAccount = user.linkedAccounts?.find(
-      (account) => 
-        typeof account === "object" &&
-        account !== null &&
-        "chainType" in account &&
-        (account as { chainType?: unknown }).chainType === "aptos"
-    );
-    const moveWallet = foundAccount && isAptosAccount(foundAccount) ? foundAccount : undefined;
 
     if (!moveWallet) {
       setTxStatus("Please create a Move wallet first");
@@ -115,11 +116,21 @@ export default function MovementTxPage() {
 
     if (!recipientAddress.trim()) {
       setTxStatus("Please enter a recipient address");
+      setAddressError("Recipient address is required");
       return;
     }
 
-    const walletAddress = (moveWallet as AptosLinkedAccount).address as string;
-    let publicKeyHex = ((moveWallet as AptosLinkedAccount).publicKey as string) || "";
+    // Validate address format
+    if (!isValidAddress(recipientAddress.trim())) {
+      setTxStatus("Invalid recipient address format");
+      setAddressError("Please enter a valid Aptos address");
+      return;
+    }
+
+    setAddressError("");
+
+    const walletAddress = moveWallet.address;
+    let publicKeyHex = moveWallet.publicKey;
 
     if (!walletAddress || !publicKeyHex) {
       setTxStatus("Wallet not properly configured");
@@ -130,16 +141,10 @@ export default function MovementTxPage() {
     setTxStatus("");
 
     try {
-      // Clean up public key format
-      if (publicKeyHex.toLowerCase().startsWith("0x")) {
-        publicKeyHex = publicKeyHex.slice(2);
-      }
-
-      if (publicKeyHex.length === 66 && publicKeyHex.startsWith("00")) {
-        publicKeyHex = publicKeyHex.substring(2);
-      }
-
-      if (publicKeyHex.length !== 64) {
+      // Clean public key using utility function
+      try {
+        publicKeyHex = cleanPublicKey(publicKeyHex);
+      } catch {
         setTxStatus("Invalid public key format");
         setIsLoading(false);
         return;
@@ -147,7 +152,7 @@ export default function MovementTxPage() {
 
       const address = AccountAddress.from(walletAddress);
       const recipientAddr = AccountAddress.from(recipientAddress.trim());
-      const amountInOctas = BigInt(parseInt(amount) * 100000000); // Convert to octas
+      const amountInOctas = aptToOctas(parseFloat(amount) || 0);
 
       // Build the raw transaction
       const rawTxn = await aptos.transaction.build.simple({
@@ -191,7 +196,7 @@ export default function MovementTxPage() {
       // Refresh wallet balance
       await fetchWalletBalance(walletAddress);
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "Transaction failed";
+      const errorMessage = getErrorMessage(error);
       setTxStatus(`❌ Error: ${errorMessage}`);
       console.error("Transaction error:", error);
     } finally {
@@ -228,17 +233,7 @@ export default function MovementTxPage() {
     );
   }
 
-  // Get Move wallet from user's linked accounts
-  const foundAccount = user?.linkedAccounts?.find(
-    (account) => 
-      typeof account === "object" &&
-      account !== null &&
-      "chainType" in account &&
-      (account as { chainType?: unknown }).chainType === "aptos"
-  );
-  const moveWallet = foundAccount && isAptosAccount(foundAccount) ? foundAccount : undefined;
-
-  const balanceInMOVE = (parseInt(walletBalance) / 100000000).toFixed(4);
+  const balanceInMOVE = formatAPT(octasToAPT(walletBalance));
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4">
@@ -259,7 +254,7 @@ export default function MovementTxPage() {
             <div className="text-center">
               <div className="text-sm text-blue-600 mb-1">Address:</div>
               <div className="text-xs font-mono text-blue-800 break-all bg-blue-100 p-2 rounded mb-2">
-                {(moveWallet as AptosLinkedAccount).address}
+                {moveWallet.address}
               </div>
               <div className="text-sm text-blue-600">
                 Balance:{" "}
@@ -273,9 +268,10 @@ export default function MovementTxPage() {
               </div>
               <button
                 onClick={createMoveWallet}
-                className="bg-blue-500 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-600 transition-colors"
+                disabled={creatingWallet}
+                className="bg-blue-500 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-blue-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                Create Move Wallet
+                {creatingWallet ? "Creating..." : "Create Move Wallet"}
               </button>
             </div>
           )}
@@ -290,11 +286,19 @@ export default function MovementTxPage() {
             <input
               type="text"
               value={recipientAddress}
-              onChange={(e) => setRecipientAddress(e.target.value)}
+              onChange={(e) => {
+                setRecipientAddress(e.target.value);
+                setAddressError("");
+              }}
               placeholder="0x..."
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className={`w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                addressError ? "border-red-300" : "border-gray-300"
+              }`}
               disabled={isLoading}
             />
+            {addressError && (
+              <p className="text-xs text-red-500 mt-1">{addressError}</p>
+            )}
           </div>
 
           <div>
@@ -330,12 +334,12 @@ export default function MovementTxPage() {
           <div className="p-4 rounded-lg text-sm text-center mb-4 bg-gray-50 border border-gray-200">
             <div className="mb-2">{txStatus}</div>
             {txHash && (
-              <div className="text-xs">
+              <div className="text-xs mt-2">
                 <a
-                  href={`https://explorer.movementnetwork.xyz/txn/${txHash}?network=bardock+testnet`}
+                  href={getMovementExplorerLink(txHash)}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-blue-600 hover:text-blue-800 underline"
+                  className="text-blue-600 hover:text-blue-800 underline font-medium"
                 >
                   View on Move Explorer ↗
                 </a>
